@@ -1,72 +1,54 @@
 import os
-import logging
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import telebot
 from flask import Flask
 from threading import Thread
 
+# تنظیمات توکن و ادمین
+API_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_CHAT_ID = "638640702" # آیدی عددی خودت
+bot = telebot.TeleBot(API_TOKEN)
 app = Flask('')
 
+# --- بخش وب‌سرور برای زنده نگه داشتن ---
 @app.route('/')
 def home():
-    return "I am alive!"
+    return "Bot is Alive!"
 
-def run():
-  app.run(host='0.0.0.0', port=8080)
+def run_web_server():
+    # پورت رندر معمولاً روی 10000 یا 8080 است
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = Thread(target=run)
+    t = Thread(target=run_web_server)
     t.start()
+
+# --- بخش دستورات ربات ---
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    markup = telebot.types.InlineKeyboardMarkup()
+    btn1 = telebot.types.InlineKeyboardButton("آموزش نئوویو 📊", url="https://youtube.com/@Koroush_fx")
+    btn2 = telebot.types.InlineKeyboardButton("کانال تلگرام 📢", url="https://t.me/Arshive_koroush_fx")
+    btn3 = telebot.types.InlineKeyboardButton("مشاوره اختصاصی 👤", callback_data="contact_admin")
+    markup.add(btn1)
+    markup.add(btn2)
+    markup.add(btn3)
     
-# تنظیمات لاگ برای عیب‌یابی
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    bot.reply_to(message, "سلام! به ربات آموزشی خوش آمدید. یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=markup)
 
-# خواندن توکن و آیدی ادمین از متغیرهای محیطی سرور
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_CHAT_ID")
+@bot.callback_query_handler(func=lambda call: call.data == "contact_admin")
+def contact_admin(call):
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, "لطفاً پیام خود را بنویسید تا برای ادمین ارسال شود.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        ['🚀 شروع آموزش', '💎 مشاوره اختصاصی'],
-        ['❓ سوال از من', '📊 کانال تلگرام'],
-        ['📺 یوتیوب', '📸 اینستاگرام'],
-        ['👤 درباره من', '⚠️ هشدار ریسک']
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "سلام! به دستیار هوشمند خوش آمدید.\nچطور می‌توانم به شما کمک کنم؟",
-        reply_markup=reply_markup
-    )
+@bot.message_handler(func=lambda message: True)
+def forward_to_admin(message):
+    if str(message.chat.id) != ADMIN_CHAT_ID:
+        bot.forward_message(ADMIN_CHAT_ID, message.chat.id, message.message_id)
+        bot.reply_to(message, "پیام شما دریافت شد و به زودی پاسخ داده می‌شود.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user = update.message.from_user
-
-    if text == '🚀 شروع آموزش':
-        await update.message.reply_text("برای شروع آموزش‌ها، می‌توانید از پلی‌لیست یوتیوب ما استفاده کنید یا در کانال عضو شوید.")
-    elif text == '💎 مشاوره اختصاصی':
-        await update.message.reply_text("لطفاً نام و حوزه فعالیت خود را بفرستید تا برای وقت مشاوره با شما هماهنگ شود.")
-    elif text == '📊 کانال تلگرام':
-        await update.message.reply_text("لینک کانال ما: [لینک را اینجا بگذارید]")
-    elif text == '❓ سوال از من':
-        await update.message.reply_text("سوال خود را بنویسید، من آن را برای ادمین ارسال می‌کنم.")
-    else:
-        # فوروارد پیام برای ادمین (اگر آیدی ادمین ست شده باشد)
-        if ADMIN_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"📩 پیام جدید از {user.first_name} (@{user.username}):\n\n{text}"
-            )
-            await update.message.reply_text("پیام شما دریافت شد و به زودی پاسخ داده می‌شود.")
-
-if __name__ == '__main__':
-    if not TOKEN:
-        print("خطا: توکن ربات یافت نشد!")
-    else:
-        app = ApplicationBuilder().token(TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-        print("ربات روشن شد...")
-        keep_alive()
-# خط بعدی همون دستور استارت قبلی خودت باشه
-        app.run_polling()
+# --- اجرای همزمان ---
+if __name__ == "__main__":
+    keep_alive() # اول وب‌سرور در پس‌زمینه روشن می‌شود
+    print("Bot is running...")
+    bot.infinity_polling() # سپس ربات وارد چرخه بی‌پایان می‌شود
