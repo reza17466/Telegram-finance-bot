@@ -1,11 +1,10 @@
 import os
 import sqlite3
-import math
 import json
 import urllib.request
-import urllib.error
 from datetime import datetime
 from threading import Thread, Lock
+from types import SimpleNamespace
 
 import telebot
 from telebot import types
@@ -22,6 +21,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 DB_PATH = os.getenv("TRADSCALE_DB", "tradscale.db")
 
+# کانال برای پست خودکار (اختیاری)
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@neowavetradescale")
+
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
 
@@ -31,7 +33,7 @@ app = Flask("TradScale")
 db_lock = Lock()
 user_states = {}
 
-# ---------- DEFAULT LINKS (your real links) ----------
+# ---------- لینک‌های پیش‌فرض ----------
 DEFAULT_CHANNEL = "https://t.me/neowavetradescale"
 DEFAULT_GROUP   = "https://t.me/tradescalegroup"
 DEFAULT_YOUTUBE = "https://youtube.com/@neowave-forex-trader?si=z2pMVBRzf9uoEVpd"
@@ -92,7 +94,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS admin_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL, admin_message_id INTEGER,
-                user_message_id INTEGER, created_at TEXT
+                user_message_id INTEGER, message_type TEXT DEFAULT 'contact',
+                created_at TEXT
             )
         """)
         cur.execute("""
@@ -129,7 +132,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        # ---------- Seed default links ----------
+        # ثبت لینک‌های پیش‌فرض (فقط یک‌بار)
         cur.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('channel_link', ?)",
                     (DEFAULT_CHANNEL,))
         cur.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('group_link', ?)",
@@ -270,6 +273,18 @@ def cancel_message(message):
     show_main_menu(message.chat.id)
 
 
+def call_to_message(call):
+    """پیام جعلی که از طرف کاربر واقعی است، نه ربات.
+    این تابع باگ اصلی state را در دکمه‌های شیشه‌ای حل می‌کند."""
+    return SimpleNamespace(
+        from_user=call.from_user,
+        chat=call.message.chat,
+        message_id=call.message.message_id,
+        text=call.message.text or "",
+        content_type="text",
+    )
+
+
 # ============================================================
 #                         MAIN MENU
 # ============================================================
@@ -335,7 +350,7 @@ def show_tools_menu(chat_id):
 
 
 # ============================================================
-#                    ANALYSES (user side)
+#                    ANALYSES (user)
 # ============================================================
 
 def show_analyses_menu(chat_id):
@@ -366,11 +381,7 @@ def show_analyses_menu(chat_id):
         ))
     markup.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu"))
 
-    bot.send_message(
-        chat_id,
-        "📊 <b>تحلیل‌ها</b>\n\nدسته‌بندی مورد نظر را انتخاب کن:",
-        reply_markup=markup
-    )
+    bot.send_message(chat_id, "📊 <b>تحلیل‌ها</b>\n\nدسته را انتخاب کن:", reply_markup=markup)
 
 
 def show_analyses_by_category(chat_id, category):
@@ -400,7 +411,7 @@ def show_analyses_by_category(chat_id, category):
 
 
 # ============================================================
-#                    TUTORIALS (user side)
+#                    TUTORIALS (user)
 # ============================================================
 
 def show_tutorials_menu(chat_id):
@@ -415,8 +426,7 @@ def show_tutorials_menu(chat_id):
         bot.send_message(
             chat_id,
             "🎓 <b>آموزش‌ها</b>\n\n"
-            "در حال حاضر آموزشی ثبت نشده است.\n"
-            "به زودی آموزش‌های جدید اینجا قرار می‌گیرند.",
+            "در حال حاضر آموزشی ثبت نشده است.",
             reply_markup=types.InlineKeyboardMarkup().add(
                 types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu")
             )
@@ -425,12 +435,10 @@ def show_tutorials_menu(chat_id):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     for row in rows:
-        cat = row["category"]
         markup.add(types.InlineKeyboardButton(
-            f"📁 {cat}", callback_data=f"tutorial_cat_{cat}"
+            f"📁 {row['category']}", callback_data=f"tutorial_cat_{row['category']}"
         ))
     markup.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu"))
-
     bot.send_message(chat_id, "🎓 <b>آموزش‌ها</b>\n\nدسته را انتخاب کن:", reply_markup=markup)
 
 
@@ -452,7 +460,6 @@ def show_tutorials_by_category(chat_id, category):
             f"📚 {row['title']}", callback_data=f"tutorial_view_{row['id']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ بازگشت", callback_data="menu_tutorials"))
-
     bot.send_message(chat_id, f"📁 <b>{category}</b>\n\n{len(rows)} آموزش:", reply_markup=markup)
 
 
@@ -482,7 +489,7 @@ def show_tutorial_detail(chat_id, tutorial_id):
 
 
 # ============================================================
-#                    LINKS (group + channel + youtube)
+#                    LINKS
 # ============================================================
 
 def show_links(chat_id):
@@ -501,9 +508,9 @@ def show_links(chat_id):
 
     bot.send_message(
         chat_id,
-        "🔗 <b>لینک گروه و کانال</b>\n\n"
-        "برای عضویت روی دکمه‌های زیر بزن:",
-        reply_markup=markup
+        "🔗 <b>لینک گروه و کانال</b>\n\nبرای عضویت روی دکمه‌های زیر بزن:",
+        reply_markup=markup,
+        disable_web_page_preview=True
     )
 
 
@@ -515,9 +522,7 @@ def start_request_analysis(message):
     set_state(message.from_user.id, "req_symbol")
     bot.send_message(
         message.chat.id,
-        "📝 <b>درخواست تحلیل</b>\n\n"
-        "مرحله 1 از 3\n\n"
-        "نماد مورد نظر:\n\n<code>XAUUSD</code> یا <code>BTCUSDT</code>"
+        "📝 <b>درخواست تحلیل</b>\n\nمرحله 1 از 3\n\nنماد:\n<code>XAUUSD</code>"
     )
 
 
@@ -529,22 +534,19 @@ def request_analysis_process(message):
     if is_cancel(message.text):
         cancel_message(message)
         return True
-
     current = state["state"]
     data = state["data"]
 
     if current == "req_symbol":
         data["symbol"] = message.text.strip().upper()
         set_state(user_id, "req_tf", data)
-        bot.send_message(message.chat.id,
-            "مرحله 2 از 3\n\n⏱ تایم‌فریم:\nمثال: <code>1D</code> یا <code>4H</code>")
+        bot.send_message(message.chat.id, "مرحله 2 از 3\n\n⏱ تایم‌فریم:\n<code>1D</code>")
         return True
 
     if current == "req_tf":
         data["tf"] = message.text.strip()
         set_state(user_id, "req_note", data)
-        bot.send_message(message.chat.id,
-            "مرحله 3 از 3\n\n✍️ توضیحات یا سؤال. اگر نداری <code>-</code> بفرست.")
+        bot.send_message(message.chat.id, "مرحله 3 از 3\n\n✍️ توضیحات یا <code>-</code>:")
         return True
 
     if current == "req_note":
@@ -641,7 +643,7 @@ def send_to_admin(message):
             conn.commit()
             conn.close()
         bot.reply_to(message,
-            "✅ پیام شما برای استاد TradScale ارسال شد.\n"
+            "✅ پیام شما برای استاد ارسال شد.\n"
             "به محض پاسخ، برای شما ارسال می‌شود.")
     except Exception as e:
         print("Admin forward error:", e)
@@ -651,7 +653,7 @@ def send_to_admin(message):
 
 
 # ============================================================
-#                    ADMIN REPLY SYSTEM
+#                    ADMIN REPLY
 # ============================================================
 
 def handle_admin_reply(message):
@@ -671,7 +673,6 @@ def handle_admin_reply(message):
             ORDER BY id DESC LIMIT 1
         """, (replied_id,))
         row = cur.fetchone()
-
         if row and row["message_type"] == "analysis_request":
             cur.execute("UPDATE analysis_requests SET status='ANSWERED' WHERE admin_message_id=?",
                         (replied_id,))
@@ -734,15 +735,19 @@ def show_admin_panel(chat_id):
         types.InlineKeyboardButton("▶️ لینک یوتیوب", callback_data="admin_set_youtube")
     )
     markup.add(
+        types.InlineKeyboardButton("📮 ارسال منو به کانال", callback_data="admin_post_channel"),
+        types.InlineKeyboardButton("📌 پین منو در کانال", callback_data="admin_pin_channel")
+    )
+    markup.add(
         types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu")
     )
 
     bot.send_message(
         chat_id,
         "🔧 <b>پنل مدیریت TradScale</b>\n\n"
-        f"📢 کانال فعلی:\n<code>{channel_link}</code>\n\n"
-        f"👥 گروه فعلی:\n<code>{group_link}</code>\n\n"
-        f"▶️ یوتیوب فعلی:\n<code>{youtube_link}</code>\n\n"
+        f"📢 کانال: <code>{channel_link}</code>\n"
+        f"👥 گروه: <code>{group_link}</code>\n"
+        f"▶️ یوتیوب: <code>{youtube_link}</code>\n\n"
         "یکی از گزینه‌ها را انتخاب کن:",
         reply_markup=markup,
         disable_web_page_preview=True
@@ -790,7 +795,6 @@ def admin_list_analyses(chat_id):
     for i in range(0, len(buttons), 3):
         markup.add(*buttons[i:i+3])
     markup.add(types.InlineKeyboardButton("◀️ بازگشت", callback_data="admin_panel"))
-
     bot.send_message(chat_id, "برای حذف، روی شماره بزن:", reply_markup=markup)
 
 
@@ -823,7 +827,6 @@ def admin_list_tutorials(chat_id):
     for i in range(0, len(buttons), 3):
         markup.add(*buttons[i:i+3])
     markup.add(types.InlineKeyboardButton("◀️ بازگشت", callback_data="admin_panel"))
-
     bot.send_message(chat_id, "برای حذف، روی شماره بزن:", reply_markup=markup)
 
 
@@ -842,8 +845,7 @@ def admin_process(message):
     if current == "admin_analysis_name":
         data["name"] = message.text.strip()
         set_state(user_id, "admin_analysis_link", data)
-        bot.send_message(message.chat.id,
-            "مرحله 2 از 3\n\n🔗 لینک تحلیل یا <code>-</code>:")
+        bot.send_message(message.chat.id, "مرحله 2 از 3\n\n🔗 لینک تحلیل یا <code>-</code>:")
         return True
 
     if current == "admin_analysis_link":
@@ -861,16 +863,14 @@ def admin_process(message):
     if current == "admin_tutorial_title":
         data["title"] = message.text.strip()
         set_state(user_id, "admin_tutorial_content", data)
-        bot.send_message(message.chat.id,
-            "مرحله 2 از 4\n\n✍️ محتوا یا <code>-</code>:")
+        bot.send_message(message.chat.id, "مرحله 2 از 4\n\n✍️ محتوا یا <code>-</code>:")
         return True
 
     if current == "admin_tutorial_content":
         content = message.text.strip()
         data["content"] = "" if content == "-" else content
         set_state(user_id, "admin_tutorial_link", data)
-        bot.send_message(message.chat.id,
-            "مرحله 3 از 4\n\n🔗 لینک یا <code>-</code>:")
+        bot.send_message(message.chat.id, "مرحله 3 از 4\n\n🔗 لینک یا <code>-</code>:")
         return True
 
     if current == "admin_tutorial_link":
@@ -885,7 +885,6 @@ def admin_process(message):
         bot.send_message(message.chat.id, "مرحله 4 از 4\n\n📁 دسته‌بندی:", reply_markup=markup)
         return True
 
-    # ---------- LINK SETTINGS (all three) ----------
     if current in ("admin_set_group", "admin_set_channel", "admin_set_youtube"):
         link = message.text.strip()
         key_map = {
@@ -903,6 +902,83 @@ def admin_process(message):
     return True
 
 
+# ---------- پست منو به کانال ----------
+
+def build_channel_menu():
+    """دکمه‌های شیشه‌ای برای پست کانال."""
+    channel_link = get_setting("channel_link", DEFAULT_CHANNEL)
+    group_link   = get_setting("group_link",   DEFAULT_GROUP)
+    youtube_link = get_setting("youtube_link", DEFAULT_YOUTUBE)
+    bot_username = bot.get_me().username
+    bot_url = f"https://t.me/{bot_username}"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📊 تحلیل‌ها", url=f"{bot_url}?start=analyses"),
+        types.InlineKeyboardButton("🎓 آموزش‌ها", url=f"{bot_url}?start=tutorials")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📝 درخواست تحلیل", url=f"{bot_url}?start=req"),
+        types.InlineKeyboardButton("💬 ارتباط با استاد", url=f"{bot_url}?start=contact")
+    )
+    if channel_link:
+        markup.add(types.InlineKeyboardButton("📢 کانال", url=channel_link))
+    if group_link:
+        markup.add(types.InlineKeyboardButton("👥 گروه", url=group_link))
+    if youtube_link:
+        markup.add(types.InlineKeyboardButton("▶️ YouTube", url=youtube_link))
+    return markup
+
+
+def post_channel_menu(chat_id):
+    try:
+        me = bot.get_me()
+        msg = bot.send_message(
+            CHANNEL_ID,
+            "📌 <b>منوی TradScale</b>\n\n"
+            "برای دسترسی سریع، روی دکمه‌های زیر بزن:\n"
+            f"👉 @{me.username}",
+            reply_markup=build_channel_menu(),
+            disable_web_page_preview=True
+        )
+        bot.send_message(
+            chat_id,
+            f"✅ پست به کانال ارسال شد.\n"
+            f"Message ID: <code>{msg.message_id}</code>\n\n"
+            "برای پین کردن، روی «📌 پین منو در کانال» بزن."
+        )
+    except Exception as e:
+        print("Channel post error:", e)
+        bot.send_message(
+            chat_id,
+            f"❌ خطا در ارسال به کانال:\n<code>{e}</code>\n\n"
+            "مطمئن شو:\n"
+            "1. ربات ادمین کانال است\n"
+            "2. `CHANNEL_ID` در Environment تنظیم شده\n"
+            "3. دسترسی Post Messages دارد"
+        )
+
+
+def pin_channel_menu(chat_id):
+    try:
+        msg = bot.send_message(
+            CHANNEL_ID,
+            "📌 <b>منوی TradScale (Pin)</b>\n\n"
+            "برای دسترسی سریع روی دکمه‌های زیر بزن:",
+            reply_markup=build_channel_menu(),
+            disable_web_page_preview=True
+        )
+        bot.pin_chat_message(
+            chat_id=CHANNEL_ID,
+            message_id=msg.message_id,
+            disable_notification=True
+        )
+        bot.send_message(chat_id, "✅ منو پین شد.")
+    except Exception as e:
+        print("Pin error:", e)
+        bot.send_message(chat_id, f"❌ خطا در پین:\n<code>{e}</code>")
+
+
 # ============================================================
 #                          START
 # ============================================================
@@ -911,6 +987,23 @@ def admin_process(message):
 def start_command(message):
     ensure_user(message)
     clear_state(message.from_user.id)
+
+    # هندل پارامترهای deep-link
+    args = message.text.split()
+    if len(args) > 1:
+        payload = args[1].strip()
+        if payload == "analyses":
+            show_analyses_menu(message.chat.id)
+            return
+        if payload == "tutorials":
+            show_tutorials_menu(message.chat.id)
+            return
+        if payload == "req":
+            start_request_analysis(message)
+            return
+        if payload == "contact":
+            start_contact_admin(message)
+            return
 
     welcome = (
         "🚀 <b>Welcome to TradScale</b>\n\n"
@@ -927,8 +1020,6 @@ def start_command(message):
     youtube_link = get_setting("youtube_link", DEFAULT_YOUTUBE)
 
     markup = types.InlineKeyboardMarkup()
-
-    # Section 1 — main sections
     markup.add(
         types.InlineKeyboardButton("📊 تحلیل‌ها", callback_data="menu_analyses"),
         types.InlineKeyboardButton("🎓 آموزش‌ها", callback_data="menu_tutorials")
@@ -937,18 +1028,16 @@ def start_command(message):
         types.InlineKeyboardButton("📝 درخواست تحلیل", callback_data="menu_request_analysis"),
         types.InlineKeyboardButton("💬 ارتباط با استاد", callback_data="contact_admin")
     )
-
-    # Section 2 — social links
     if channel_link:
         markup.add(types.InlineKeyboardButton("📢 کانال تلگرام", url=channel_link))
     if group_link:
         markup.add(types.InlineKeyboardButton("👥 گروه تلگرام", url=group_link))
     if youtube_link:
         markup.add(types.InlineKeyboardButton("▶️ YouTube", url=youtube_link))
-
     markup.add(types.InlineKeyboardButton("🏠 منوی کامل", callback_data="main_menu"))
 
-    bot.send_message(message.chat.id, welcome, reply_markup=markup)
+    bot.send_message(message.chat.id, welcome, reply_markup=markup,
+                     disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["menu"])
@@ -972,6 +1061,7 @@ def callback_router(call):
 
     data = call.data
     chat_id = call.message.chat.id
+    fake = call_to_message(call)  # ⭐ پیام جعلی از طرف کاربر
 
     if data == "main_menu":
         clear_state(user_id)
@@ -985,7 +1075,7 @@ def callback_router(call):
     elif data == "menu_links":
         show_links(chat_id)
     elif data == "menu_request_analysis":
-        start_request_analysis(call.message)
+        start_request_analysis(fake)
 
     elif data.startswith("analysis_cat_"):
         show_analyses_by_category(chat_id, data.replace("analysis_cat_", ""))
@@ -1016,6 +1106,10 @@ def callback_router(call):
     elif data == "admin_set_youtube":
         set_state(user_id, "admin_set_youtube")
         bot.send_message(chat_id, "▶️ لینک جدید یوتیوب را بفرست:")
+    elif data == "admin_post_channel":
+        post_channel_menu(chat_id)
+    elif data == "admin_pin_channel":
+        pin_channel_menu(chat_id)
 
     elif data.startswith("admin_cat_analysis_"):
         category = data.replace("admin_cat_analysis_", "")
@@ -1033,7 +1127,7 @@ def callback_router(call):
             conn.commit()
             conn.close()
         clear_state(user_id)
-        bot.send_message(chat_id, f"✅ تحلیل «{d['name']}» در دسته «{category}» ثبت شد.")
+        bot.send_message(chat_id, f"✅ تحلیل «{d['name']}» در «{category}» ثبت شد.")
         show_admin_panel(chat_id)
 
     elif data.startswith("admin_cat_tutorial_"):
@@ -1052,7 +1146,7 @@ def callback_router(call):
             conn.commit()
             conn.close()
         clear_state(user_id)
-        bot.send_message(chat_id, f"✅ آموزش «{d['title']}» در دسته «{category}» ثبت شد.")
+        bot.send_message(chat_id, f"✅ آموزش «{d['title']}» در «{category}» ثبت شد.")
         show_admin_panel(chat_id)
 
     elif data.startswith("admin_del_analysis_"):
@@ -1077,8 +1171,9 @@ def callback_router(call):
         bot.send_message(chat_id, f"🗑 آموزش #{tid} حذف شد.")
         admin_list_tutorials(chat_id)
 
+    # ---------- TOOLS ----------
     elif data == "menu_risk":
-        start_risk_calculator(call.message)
+        start_risk_calculator(fake)
     elif data == "menu_prop":
         show_prop_menu(chat_id)
     elif data == "menu_journal":
@@ -1086,21 +1181,27 @@ def callback_router(call):
     elif data == "menu_dashboard":
         show_dashboard(chat_id)
     elif data == "menu_psychology":
-        start_psychology(call.message)
+        start_psychology(fake)
     elif data == "menu_academy":
         show_academy(chat_id)
     elif data == "menu_content":
         show_content_menu(chat_id)
     elif data == "menu_ai":
-        start_ai_assistant(call.message)
+        start_ai_assistant(fake)
     elif data == "contact_admin":
-        start_contact_admin(call.message)
+        start_contact_admin(fake)
     elif data == "menu_settings":
         show_settings(chat_id)
+
+    # ---------- INNER ----------
     elif data == "risk_again":
-        start_risk_calculator(call.message)
+        start_risk_calculator(fake)
+    elif data == "psych_again":
+        start_psychology(fake)
+    elif data == "ai_new":
+        start_ai_assistant(fake)
     elif data == "prop_new":
-        start_prop_creation(call.message)
+        start_prop_creation(fake)
     elif data == "prop_list":
         show_prop_accounts(chat_id)
     elif data.startswith("prop_view_"):
@@ -1108,23 +1209,19 @@ def callback_router(call):
     elif data.startswith("prop_delete_"):
         delete_prop(chat_id, int(data.split("_")[-1]))
     elif data == "journal_new":
-        start_journal(call.message)
+        start_journal(fake)
     elif data == "journal_open":
         show_open_trades(chat_id)
     elif data == "journal_history":
         show_trade_history(chat_id)
     elif data.startswith("close_trade_"):
-        start_close_trade(call.message, int(data.split("_")[-1]))
+        start_close_trade(fake, int(data.split("_")[-1]))
     elif data == "dashboard_refresh":
         show_dashboard(chat_id)
     elif data.startswith("academy_"):
         academy_topic(chat_id, data.replace("academy_", ""))
     elif data.startswith("content_"):
         content_topic(chat_id, data.replace("content_", ""))
-    elif data == "psych_again":
-        start_psychology(call.message)
-    elif data == "ai_new":
-        start_ai_assistant(call.message)
     elif data == "settings":
         show_settings(chat_id)
 
@@ -1242,13 +1339,10 @@ def risk_direction_callback(call):
         f"📍 Entry: <b>{fmt_number(entry)}</b>\n"
         f"🛑 SL: <b>{fmt_number(sl)}</b>\n"
         f"🎯 TP: <b>{fmt_number(tp)}</b>\n\n"
-        f"📏 Stop Distance: <b>{fmt_number(stop_dist)}</b>\n"
-        f"📐 Target Distance: <b>{fmt_number(target_dist)}</b>\n\n"
         f"📦 Position Size: <b>{fmt_number(pos_size, 6)}</b>\n\n"
         f"⚖️ R:R: <b>1 : {fmt_number(rr, 2)}</b>\n"
         f"💵 Potential Profit: <b>{fmt_number(potential_profit)}</b>\n"
-        "━━━━━━━━━━━━━━\n\n"
-        "⚠️ محاسبه آموزشی است."
+        "━━━━━━━━━━━━━━"
     )
     bot.send_message(call.message.chat.id, result)
     markup = types.InlineKeyboardMarkup()
@@ -1270,17 +1364,13 @@ def show_prop_menu(chat_id):
     markup.add(types.InlineKeyboardButton("➕ Challenge جدید", callback_data="prop_new"))
     markup.add(types.InlineKeyboardButton("📋 Challengeهای من", callback_data="prop_list"))
     markup.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu"))
-    bot.send_message(chat_id,
-        "🏆 <b>Prop Challenge Manager</b>\n\n"
-        "اطلاعات Challenge را ثبت کن تا وضعیت محاسبه شود.",
-        reply_markup=markup)
+    bot.send_message(chat_id, "🏆 <b>Prop Challenge Manager</b>", reply_markup=markup)
 
 
 def start_prop_creation(message):
     set_state(message.from_user.id, "prop_name")
     bot.send_message(message.chat.id,
-        "🏆 ساخت Challenge جدید\n\nمرحله 1 از 6\n\n"
-        "نام Challenge:\n<code>Prop Firm - 100K</code>")
+        "🏆 مرحله 1 از 6\n\nنام Challenge:\n<code>Prop Firm - 100K</code>")
 
 
 def prop_process(message):
@@ -1299,40 +1389,35 @@ def prop_process(message):
         return True
     if current == "prop_account":
         v = safe_float(message.text)
-        if v is None or v <= 0:
-            bot.reply_to(message, "❌ نامعتبر."); return True
+        if v is None or v <= 0: bot.reply_to(message, "❌ نامعتبر."); return True
         data["account_size"] = v
         set_state(user_id, "prop_target", data)
         bot.send_message(message.chat.id, "مرحله 3 از 6\n\n🎯 Profit Target %:")
         return True
     if current == "prop_target":
         v = safe_float(message.text)
-        if v is None or v <= 0:
-            bot.reply_to(message, "❌ نامعتبر."); return True
+        if v is None or v <= 0: bot.reply_to(message, "❌ نامعتبر."); return True
         data["target"] = v
         set_state(user_id, "prop_max_dd", data)
         bot.send_message(message.chat.id, "مرحله 4 از 6\n\n📉 Max Drawdown %:")
         return True
     if current == "prop_max_dd":
         v = safe_float(message.text)
-        if v is None or v <= 0:
-            bot.reply_to(message, "❌ نامعتبر."); return True
+        if v is None or v <= 0: bot.reply_to(message, "❌ نامعتبر."); return True
         data["max_dd"] = v
         set_state(user_id, "prop_daily_dd", data)
         bot.send_message(message.chat.id, "مرحله 5 از 6\n\n📉 Daily Drawdown %:")
         return True
     if current == "prop_daily_dd":
         v = safe_float(message.text)
-        if v is None or v <= 0:
-            bot.reply_to(message, "❌ نامعتبر."); return True
+        if v is None or v <= 0: bot.reply_to(message, "❌ نامعتبر."); return True
         data["daily_dd"] = v
         set_state(user_id, "prop_balance", data)
         bot.send_message(message.chat.id, "مرحله 6 از 6\n\n💵 موجودی فعلی:")
         return True
     if current == "prop_balance":
         v = safe_float(message.text)
-        if v is None or v <= 0:
-            bot.reply_to(message, "❌ نامعتبر."); return True
+        if v is None or v <= 0: bot.reply_to(message, "❌ نامعتبر."); return True
         data["balance"] = v
         with db_lock:
             conn = get_db(); cur = conn.cursor()
@@ -1380,9 +1465,7 @@ def show_prop_details(chat_id, prop_id):
     target_pct = float(row["profit_target_percent"])
     max_dd = float(row["max_drawdown_percent"]); daily_dd = float(row["daily_drawdown_percent"])
     pnl = balance - starting; pnl_pct = (pnl / starting) * 100
-    target_amount = starting * target_pct / 100
-    target_balance = starting + target_amount
-    max_dd_amt = starting * max_dd / 100; daily_dd_amt = starting * daily_dd / 100
+    target_balance = starting + (starting * target_pct / 100)
     remaining = max(0, target_balance - balance)
     if pnl_pct >= target_pct: status = "🎉 TARGET REACHED"
     elif pnl_pct <= -max_dd: status = "🛑 MAX DRAWDOWN BREACHED"
@@ -1393,10 +1476,10 @@ def show_prop_details(chat_id, prop_id):
         f"💰 Starting: <b>{fmt_number(starting)}</b>\n"
         f"💵 Current: <b>{fmt_number(balance)}</b>\n"
         f"📈 P/L: <b>{fmt_number(pnl)}</b> (<b>{fmt_number(pnl_pct)}%</b>)\n"
-        f"🎯 Target: <b>{fmt_number(target_pct)}%</b> → <b>{fmt_number(target_balance)}</b>\n"
+        f"🎯 Target Balance: <b>{fmt_number(target_balance)}</b>\n"
         f"⏳ Remaining: <b>{fmt_number(remaining)}</b>\n"
-        f"📉 Max DD: <b>{fmt_number(max_dd)}%</b> ≈ {fmt_number(max_dd_amt)}\n"
-        f"📉 Daily DD: <b>{fmt_number(daily_dd)}%</b> ≈ {fmt_number(daily_dd_amt)}\n"
+        f"📉 Max DD: <b>{fmt_number(max_dd)}%</b>\n"
+        f"📉 Daily DD: <b>{fmt_number(daily_dd)}%</b>\n"
         "━━━━━━━━━━━━━━"
     )
     markup = types.InlineKeyboardMarkup()
@@ -1427,13 +1510,13 @@ def show_journal_menu(chat_id):
     )
     markup.add(types.InlineKeyboardButton("📈 Dashboard", callback_data="menu_dashboard"))
     markup.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu"))
-    bot.send_message(chat_id, "📔 <b>Trading Journal</b>\n\nهر معامله را ثبت کن.", reply_markup=markup)
+    bot.send_message(chat_id, "📔 <b>Trading Journal</b>", reply_markup=markup)
 
 
 def start_journal(message):
     set_state(message.from_user.id, "journal_symbol")
     bot.send_message(message.chat.id,
-        "📔 <b>New Trade</b>\n\nمرحله 1 از 10\n\nنماد:\n<code>XAUUSD</code>")
+        "📔 مرحله 1 از 10\n\nنماد:\n<code>XAUUSD</code>")
 
 
 def journal_process(message):
@@ -1526,9 +1609,7 @@ def journal_process(message):
         bot.send_message(message.chat.id,
             f"✅ Trade #{trade_id} ثبت شد.\n\n"
             f"📌 {data['symbol']} — {direction}\n"
-            f"Entry: {fmt_number(entry)} | SL: {fmt_number(sl)} | TP: {fmt_number(tp)}\n"
-            f"Risk: {fmt_number(risk)}% | R:R 1:{fmt_number(rr)}\n"
-            f"🧠 Emotion: {data['emotion']}")
+            f"Risk: {fmt_number(risk)}% | R:R 1:{fmt_number(rr)}")
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("📸 Screenshot", callback_data=f"add_screenshot_{trade_id}"))
         markup.add(types.InlineKeyboardButton("🔴 بستن", callback_data=f"close_trade_{trade_id}"))
@@ -1587,9 +1668,7 @@ def show_trade_history(chat_id):
             f"{row['symbol']} — {row['direction']}\n"
             f"Result: <b>{row['result']}</b>\n"
             f"P/L: <b>{fmt_number(row['pnl'])}</b>\n"
-            f"R:R 1:{fmt_number(row['rr'])}\n"
-            f"Setup: {row['setup']}\n"
-            f"Emotion: {row['emotion_before']}")
+            f"R:R 1:{fmt_number(row['rr'])}")
 
 
 def start_close_trade(message, trade_id):
@@ -1658,25 +1737,16 @@ def show_dashboard(chat_id):
     pnl = sum(float(r["pnl"] or 0) for r in closed)
     win_rate = (wins / len(closed) * 100) if closed else 0
     avg_rr = (sum(float(r["rr"] or 0) for r in closed) / len(closed)) if closed else 0
-    setups = {}
-    for row in closed:
-        s = row["setup"] or "Unknown"
-        setups[s] = setups.get(s, 0) + 1
-    best = max(setups, key=setups.get) if setups else "-"
     text = (
         "📈 <b>TradScale Dashboard</b>\n\n"
         "━━━━━━━━━━━━━━\n"
         f"👤 Level: <b>{profile['level'] if profile else 'Beginner'}</b>\n"
         f"🏅 XP: <b>{profile['xp'] if profile else 0}</b>\n"
         "━━━━━━━━━━━━━━\n"
-        f"📔 Total: <b>{total}</b>\n"
-        f"🟢 Wins: <b>{wins}</b>\n"
-        f"🔴 Losses: <b>{losses}</b>\n"
-        f"🟡 BE: <b>{bes}</b>\n"
+        f"📔 Total: <b>{total}</b> | 🟢 <b>{wins}</b> | 🔴 <b>{losses}</b> | 🟡 <b>{bes}</b>\n"
         f"📊 Win Rate: <b>{fmt_number(win_rate)}%</b>\n"
         f"⚖️ Avg R:R: <b>1 : {fmt_number(avg_rr)}</b>\n"
         f"💰 Total P/L: <b>{fmt_number(pnl)}</b>\n"
-        f"🔥 Best Setup: <b>{best}</b>\n"
         "━━━━━━━━━━━━━━"
     )
     markup = types.InlineKeyboardMarkup()
@@ -1689,15 +1759,15 @@ def show_dashboard(chat_id):
 
 
 # ============================================================
-#                    PSYCHOLOGY CHECK
+#                    PSYCHOLOGY
 # ============================================================
 
 def start_psychology(message):
     set_state(message.from_user.id, "psych_q1", {})
     bot.send_message(message.chat.id,
         "🧠 <b>Psychology Check</b>\n\nسؤال 1:\n\n"
-        "چرا می‌خواهی وارد این معامله شوی؟\n\n"
-        "1️⃣ Setup معتبر\n2️⃣ FOMO\n3️⃣ Revenge\n4️⃣ جبران ضرر\n5️⃣ مطمئن نیستم\n\nفقط شماره.")
+        "چرا می‌خواهی وارد معامله شوی؟\n\n"
+        "1️⃣ Setup\n2️⃣ FOMO\n3️⃣ Revenge\n4️⃣ جبران\n5️⃣ مطمئن نیستم\n\nفقط شماره.")
 
 
 def psychology_process(message):
@@ -1711,35 +1781,29 @@ def psychology_process(message):
     if current == "psych_q1":
         data["q1"] = message.text.strip()
         set_state(user_id, "psych_q2", data)
-        bot.send_message(message.chat.id, "سؤال 2:\n\nآیا Entry، SL و Risk مشخص هستند؟\n\n1️⃣ بله\n2️⃣ خیر")
+        bot.send_message(message.chat.id, "سؤال 2:\n\nEntry/SL/Risk مشخص؟\n1️⃣ بله\n2️⃣ خیر")
         return True
     if current == "psych_q2":
         data["q2"] = message.text.strip()
         set_state(user_id, "psych_q3", data)
-        bot.send_message(message.chat.id, "سؤال 3:\n\nاگر Loss شود، آماده‌ای؟\n\n1️⃣ بله\n2️⃣ خیر")
+        bot.send_message(message.chat.id, "سؤال 3:\n\nآماده Loss هستی؟\n1️⃣ بله\n2️⃣ خیر")
         return True
     if current == "psych_q3":
         data["q3"] = message.text.strip()
         set_state(user_id, "psych_q4", data)
-        bot.send_message(message.chat.id, "سؤال 4:\n\nطبق سیستم معاملاتی توست؟\n\n1️⃣ بله\n2️⃣ خیر")
+        bot.send_message(message.chat.id, "سؤال 4:\n\nطبق سیستم است؟\n1️⃣ بله\n2️⃣ خیر")
         return True
     if current == "psych_q4":
         data["q4"] = message.text.strip()
-        score = 0
-        for k in ["q1", "q2", "q3", "q4"]:
-            if data[k] == "1":
-                score += 25
-        if score >= 90: verdict = "🟢 READY"
-        elif score >= 70: verdict = "🟡 CAUTION"
-        else: verdict = "🔴 NOT READY"
+        score = sum(25 for k in ["q1","q2","q3","q4"] if data[k] == "1")
+        verdict = "🟢 READY" if score >= 90 else "🟡 CAUTION" if score >= 70 else "🔴 NOT READY"
         clear_state(user_id)
-        bot.send_message(message.chat.id,
-            f"🧠 <b>Result</b>\n\nScore: <b>{score}/100</b>\nStatus: <b>{verdict}</b>")
+        bot.send_message(message.chat.id, f"🧠 Score: <b>{score}/100</b>\nStatus: <b>{verdict}</b>")
         add_xp(user_id, 10)
         markup = types.InlineKeyboardMarkup()
         markup.add(
-            types.InlineKeyboardButton("🔄 Check Again", callback_data="psych_again"),
-            types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu"))
+            types.InlineKeyboardButton("🔄 مجدد", callback_data="psych_again"),
+            types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu"))
         bot.send_message(message.chat.id, "ادامه:", reply_markup=markup)
         return True
     return True
@@ -1751,28 +1815,27 @@ def psychology_process(message):
 
 def show_academy(chat_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    topics = [
+    for title, key in [
         ("📊 Technical", "technical"), ("🌊 NeoWave", "neowave"),
         ("🧠 Smart Money", "smartmoney"), ("💰 Risk Mgmt", "risk"),
         ("🧠 Psychology", "psychology"), ("🏆 Prop", "prop"),
         ("📔 Journal", "journal"), ("⚙️ System", "system"),
-    ]
-    for title, key in topics:
+    ]:
         markup.add(types.InlineKeyboardButton(title, callback_data=f"academy_{key}"))
     markup.add(types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu"))
-    bot.send_message(chat_id, "🎓 <b>TradScale Academy</b>\n\nموضوع را انتخاب کن:", reply_markup=markup)
+    bot.send_message(chat_id, "🎓 <b>Academy</b>", reply_markup=markup)
 
 
 def academy_topic(chat_id, topic):
     lessons = {
-        "technical": "📊 Technical Analysis\n\n• Market Structure\n• Support/Resistance\n• Trend\n• Price Action\n• Liquidity\n• Confirmation",
-        "neowave": "🌊 NeoWave\n\n• Wave Structure\n• Corrective Patterns\n• Elliott Wave\n• NeoWave Rules\n• Structural Validation",
-        "smartmoney": "🧠 Smart Money\n\n• Liquidity\n• BOS\n• CHoCH\n• Order Blocks\n• Imbalances\n• Market Structure",
-        "risk": "💰 Risk Management\n\n• Risk per Trade\n• Position Sizing\n• R:R\n• Drawdown\n• Daily Loss Limit\n• Capital Preservation",
-        "psychology": "🧠 Psychology\n\n• FOMO\n• Revenge Trading\n• Overtrading\n• Fear/Greed\n• Discipline\n• Consistency",
-        "prop": "🏆 Prop Trading\n\n• Challenge Rules\n• Daily DD\n• Max DD\n• Profit Target\n• Risk Planning\n• Consistency",
-        "journal": "📔 Trading Journal\n\n• کجا خوب عمل کردی\n• کجا از سیستم خارج شدی\n• کدام Setup جواب می‌دهد",
-        "system": "⚙️ Trading System\n\n1. زمان تحلیل\n2. Setupهای معتبر\n3. شرایط Entry\n4. SL\n5. Risk\n6. Exit\n7. عدم معامله",
+        "technical": "📊 Technical Analysis\n\n• Market Structure\n• Support/Resistance\n• Trend\n• Price Action\n• Liquidity",
+        "neowave": "🌊 NeoWave\n\n• Wave Structure\n• Corrective Patterns\n• Elliott Wave\n• NeoWave Rules",
+        "smartmoney": "🧠 Smart Money\n\n• Liquidity\n• BOS\n• CHoCH\n• Order Blocks\n• Imbalances",
+        "risk": "💰 Risk Management\n\n• Risk per Trade\n• Position Sizing\n• R:R\n• Drawdown",
+        "psychology": "🧠 Psychology\n\n• FOMO\n• Revenge Trading\n• Overtrading\n• Discipline",
+        "prop": "🏆 Prop Trading\n\n• Challenge Rules\n• Daily DD\n• Max DD\n• Profit Target",
+        "journal": "📔 Journal\n\n• کجا خوب عمل کردی\n• کدام Setup جواب می‌دهد",
+        "system": "⚙️ System\n\n1. زمان تحلیل\n2. Setup\n3. Entry\n4. SL\n5. Risk\n6. Exit",
     }
     bot.send_message(chat_id, lessons.get(topic, "در حال آماده‌سازی..."))
 
@@ -1785,9 +1848,6 @@ def show_content_menu(chat_id):
     markup.add(
         types.InlineKeyboardButton("🏆 Prop", callback_data="content_prop"),
         types.InlineKeyboardButton("🧠 Psychology", callback_data="content_psychology"))
-    markup.add(
-        types.InlineKeyboardButton("🌊 NeoWave", callback_data="content_neowave"),
-        types.InlineKeyboardButton("💰 Risk", callback_data="content_risk"))
     markup.add(types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu"))
     bot.send_message(chat_id, "📚 <b>Content Hub</b>", reply_markup=markup)
 
@@ -1796,10 +1856,8 @@ def content_topic(chat_id, topic):
     texts = {
         "analysis": "📊 Analysis — در کانال منتشر می‌شود.",
         "education": "🎓 Education — آموزش‌های TradScale.",
-        "prop": "🏆 Prop — تجربه‌های Prop Trading.",
+        "prop": "🏆 Prop — تجربه‌های Prop.",
         "psychology": "🧠 Psychology — ذهنیت معاملاتی.",
-        "neowave": "🌊 NeoWave — ساختار بازار.",
-        "risk": "💰 Risk — مدیریت سرمایه.",
     }
     bot.send_message(chat_id, texts.get(topic, "در حال آماده‌سازی..."))
 
@@ -1811,22 +1869,19 @@ def content_topic(chat_id, topic):
 def start_ai_assistant(message):
     if not OPENAI_API_KEY:
         bot.send_message(message.chat.id,
-            "🤖 AI غیرفعال است.\n\n<code>OPENAI_API_KEY</code> را در Environment قرار بده.")
+            "🤖 AI غیرفعال است.\n\n<code>OPENAI_API_KEY</code> را تنظیم کن.")
         return
     set_state(message.from_user.id, "ai_question")
-    bot.send_message(message.chat.id, "🤖 <b>TradScale AI</b>\n\nسؤالت را بفرست.\n\n⚠️ AI جایگزین تحلیل نیست.")
+    bot.send_message(message.chat.id, "🤖 <b>TradScale AI</b>\n\nسؤالت را بفرست.")
 
 
 def ask_openai(question):
     if not OPENAI_API_KEY:
         return None
-    sys = ("You are TradScale AI Assistant. Educational trading assistant. "
-           "Do NOT promise profits or give specific BUY/SELL signals. "
-           "Answer clearly and concisely.")
     payload = {
         "model": OPENAI_MODEL,
         "input": [
-            {"role": "system", "content": sys},
+            {"role": "system", "content": "You are TradScale AI Assistant. Educational only. Do NOT give BUY/SELL signals."},
             {"role": "user", "content": question}
         ],
         "max_output_tokens": 800
@@ -1887,13 +1942,13 @@ def show_settings(chat_id):
 @bot.callback_query_handler(func=lambda call: call.data == "settings_clear")
 def settings_clear(call):
     clear_state(call.from_user.id)
-    try: bot.answer_callback_query(call.id, "State cleared")
+    try: bot.answer_callback_query(call.id, "Cleared")
     except: pass
     bot.send_message(call.message.chat.id, "✅ State پاک شد.")
 
 
 # ============================================================
-#                    SCREENSHOT SUPPORT
+#                    SCREENSHOT
 # ============================================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("add_screenshot_"))
@@ -1920,12 +1975,12 @@ def screenshot_process(message):
                     (file_id, trade_id, user_id))
         conn.commit(); conn.close()
     clear_state(user_id); add_xp(user_id, 5)
-    bot.send_message(message.chat.id, f"📸 به Trade #{trade_id} اضافه شد.")
+    bot.send_message(message.chat.id, f"📸 اضافه شد به Trade #{trade_id}.")
     return True
 
 
 # ============================================================
-#                  CENTRAL MESSAGE ROUTER
+#                  MESSAGE ROUTER
 # ============================================================
 
 @bot.message_handler(content_types=["text", "photo", "document", "voice"])
@@ -2057,6 +2112,7 @@ if __name__ == "__main__":
     keep_alive()
     print("Database: OK")
     print("Admin ID:", ADMIN_CHAT_ID)
+    print("Channel:", CHANNEL_ID)
     print("AI:", "Enabled" if OPENAI_API_KEY else "Disabled")
     print("Bot is running...")
     bot.infinity_polling(skip_pending=True,
